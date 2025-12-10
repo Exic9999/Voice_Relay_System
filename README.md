@@ -1,4 +1,4 @@
-# Military Voice Relay System
+# Voice Relay System (VRS)
 
 Voice-activated Discord relay system for commander-to-squad communication.
 
