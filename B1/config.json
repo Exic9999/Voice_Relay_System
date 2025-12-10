@@ -1,0 +1,11 @@
+{
+    "commander_token": "MTQ0NzMxOTMxOTgxNzIyODQ0OQ.GrQctu.oyUgeLlJQAy-ggewlpWHDLRG_JtFjfM--f0F98",
+    "drone_alpha_token": "MTQ0NzMzOTQyMTk5NjQyMTE5NA.GasSZv.4IWZapYP5xI3i5enL7a60zhak_a-0RndlJp9gw",
+    "drone_bravo_token": "MTQ0NzMzOTU2NzE0NDM3MDI1Ng.GKtqS3.mKHJIONH1gJ6U8q-_GjbqXYLGFIRBhFzCLFckM",
+    "commander_user_id": "276201168412082179",
+    "drone_alpha_channel_id": "1447352511156453386",
+    "drone_bravo_channel_id": "1447352617733980252",
+    "command_prefix": "!",
+    "max_buffer_frames": 25,
+    "log_level": "DEBUG"
+}
