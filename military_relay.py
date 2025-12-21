@@ -447,7 +447,7 @@ class SquadVoiceSink(voice_recv.AudioSink):
 
 class MothershipBot(commands.Bot):
     def __init__(self):
-        intents = discord.Intents.default()
+        intents = discord.Intents.all()
         intents.message_content = True
         intents.voice_states = True
         intents.guilds = True
@@ -803,7 +803,7 @@ class MothershipBot(commands.Bot):
 
 class DroneBot(commands.Bot):
     def __init__(self, name: str, channel_id: int, mothership: MothershipBot):
-        intents = discord.Intents.default()
+        intents = discord.Intents.all()
         intents.voice_states = True
         intents.guilds = True
         intents.members = True

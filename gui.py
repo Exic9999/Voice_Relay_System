@@ -122,9 +122,7 @@ async def test_single_bot(token: str, bot_name: str, channel_id: str = None, log
     if log_func:
         log_func(f"   Connecting {bot_name}...", 'DEBUG')
     
-    intents = discord.Intents.default()
-    intents.message_content = True
-    intents.voice_states = True
+    intents = discord.Intents.all()
     intents.guilds = True
     intents.members = True
     
