@@ -1,6 +1,6 @@
 @echo off
 REM =============================================================================
-REM Military Hierarchy Voice Relay System - All-in-One Installer & Launcher
+REM Voice Relay System (VRS) - All-in-One Installer & Launcher
 REM =============================================================================
 REM This script handles EVERYTHING:
 REM   - Creates project folder
@@ -29,7 +29,7 @@ set "RESET=[0m"
 cls
 echo.
 echo %CYAN%======================================================================%RESET%
-echo %CYAN%   MILITARY HIERARCHY VOICE RELAY SYSTEM - INSTALLER%RESET%
+echo %CYAN%   VOICE RELAY SYSTEM (VRS) - INSTALLER%RESET%
 echo %CYAN%======================================================================%RESET%
 echo.
 
@@ -137,24 +137,13 @@ echo.
 
 "%PYTHON%" -m pip install --upgrade pip --quiet 2>nul
 
-"%PIP%" install discord.py[voice]>=2.3.2 --quiet
+"%PIP%" install -r "%PROJECT_DIR%\requirements.txt" --quiet
 if errorlevel 1 (
-    echo           %RED%Failed to install discord.py%RESET%
+    echo           %RED%Failed to install dependencies%RESET%
     pause
     exit /b 1
 )
-echo           %GREEN%discord.py installed%RESET%
-
-"%PIP%" install discord-ext-voice-recv>=0.5.0a167 --quiet
-if errorlevel 1 (
-    echo           %RED%Failed to install discord-ext-voice-recv%RESET%
-    pause
-    exit /b 1
-)
-echo           %GREEN%discord-ext-voice-recv installed%RESET%
-
-"%PIP%" install PyNaCl>=1.5.0 --quiet
-echo           %GREEN%PyNaCl installed%RESET%
+echo           %GREEN%All dependencies installed%RESET%
 
 REM -----------------------------------------------------------------------------
 REM STEP 6: Create Default Config
@@ -169,11 +158,11 @@ if not exist "%PROJECT_DIR%\config.json" (
         echo     "commander_token": "",
         echo     "drone_alpha_token": "",
         echo     "drone_bravo_token": "",
-        echo     "commander_user_id": "",
         echo     "drone_alpha_channel_id": "",
         echo     "drone_bravo_channel_id": "",
+        echo     "squad_uplink_timeout": 1.0,
         echo     "command_prefix": "!",
-        echo     "max_buffer_frames": 25,
+        echo     "max_buffer_frames": 100,
         echo     "log_level": "DEBUG"
         echo }
     ) > "%PROJECT_DIR%\config.json"

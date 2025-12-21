@@ -5,6 +5,7 @@
     "drone_alpha_channel_id": "1447352511156453386",
     "drone_bravo_channel_id": "1447352617733980252",
     "squad_uplink_timeout": 1.0,
+    "whisper_model": "medium",
     "command_prefix": "!",
     "max_buffer_frames": 100,
     "log_level": "DEBUG"

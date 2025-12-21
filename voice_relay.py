@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-MILITARY HIERARCHY VOICE RELAY SYSTEM
-=====================================
+VOICE RELAY SYSTEM
+==================
 Commands work in #relay-chat text channel.
 """
 
@@ -30,32 +30,65 @@ except ImportError:
     VOICE_RECV_AVAILABLE = False
     print("WARNING: discord-ext-voice-recv not installed")
 
-try:
-    import speech_recognition as sr
-    SPEECH_RECOGNITION_AVAILABLE = True
-except ImportError:
-    SPEECH_RECOGNITION_AVAILABLE = False
-    print("WARNING: speech_recognition not installed")
+def check_and_install_whisper():
+    """Check if Whisper is installed, offer to install if not."""
+    try:
+        import whisper
+        return True
+    except ImportError:
+        print("\n" + "=" * 60)
+        print("OpenAI Whisper is not installed.")
+        print("Whisper is required for voice trigger detection.")
+        print("=" * 60)
+        response = input("Install openai-whisper now? (y/n): ").strip().lower()
+        if response == 'y':
+            import subprocess
+            print("\nInstalling openai-whisper... This may take a few minutes.")
+            try:
+                subprocess.check_call([sys.executable, "-m", "pip", "install", "openai-whisper"])
+                print("Whisper installed successfully!")
+                return True
+            except subprocess.CalledProcessError as e:
+                print(f"Failed to install Whisper: {e}")
+                return False
+        else:
+            print("Whisper not installed. Voice recognition will be disabled.")
+            return False
+
+# Check/install Whisper on import
+WHISPER_AVAILABLE = check_and_install_whisper()
+
+if WHISPER_AVAILABLE:
+    import whisper
+    import numpy as np
+    WHISPER_MODEL = None  # Lazy load
+else:
+    whisper = None
+    np = None
+    WHISPER_MODEL = None
 
 # ===================================================================================
 # LOGGING
 # ===================================================================================
 
-logger = logging.getLogger("MilitaryRelay")
+logger = logging.getLogger("VoiceRelay")
 
-transcription_callback: Optional[Callable[[str, str, str], None]] = None
+transcription_callback: Optional[Callable[[str, str, str, float], None]] = None
 
 def set_transcription_callback(callback):
     global transcription_callback
     transcription_callback = callback
 
-def log_transcription(speaker_name: str, speaker_role: str, text: str):
-    logger.info("[%s] %s: \"%s\"", speaker_role, speaker_name, text)
+def log_transcription(speaker_name: str, speaker_role: str, text: str, process_time: float = 0.0):
+    if process_time > 0:
+        logger.info("[%s] %s: \"%s\" (%.2fs)", speaker_role, speaker_name, text, process_time)
+    else:
+        logger.info("[%s] %s: \"%s\"", speaker_role, speaker_name, text)
     if transcription_callback:
         try:
-            transcription_callback(speaker_name, speaker_role, text)
-        except:
-            pass
+            transcription_callback(speaker_name, speaker_role, text, process_time)
+        except Exception as e:
+            print(f"ERROR in transcription callback: {e}", file=sys.stderr)
 
 def setup_logging(level: str = "DEBUG"):
     log_level = getattr(logging, level.upper(), logging.DEBUG)
@@ -71,10 +104,13 @@ def setup_logging(level: str = "DEBUG"):
     logging.getLogger('discord').setLevel(logging.WARNING)
     logging.getLogger('discord.player').setLevel(logging.ERROR)
     logging.getLogger('discord.voice_client').setLevel(logging.ERROR)
-    
-    # Suppress the decoder packet loss warnings
-    for name in ['discord.ext.voice_recv', 'voice_recv', 'discord.opus']:
-        logging.getLogger(name).setLevel(logging.ERROR)
+    logging.getLogger('discord.voice_state').setLevel(logging.CRITICAL)
+    logging.getLogger('discord.gateway').setLevel(logging.ERROR)
+
+    # Suppress the decoder packet loss warnings and voice_recv router errors
+    for name in ['discord.ext.voice_recv', 'discord.ext.voice_recv.router',
+                 'voice_recv', 'voice_recv.router', 'discord.opus']:
+        logging.getLogger(name).setLevel(logging.CRITICAL)
 
 # ===================================================================================
 # AUDIO CONSTANTS
@@ -150,6 +186,42 @@ broadcast_buffer: Optional[AudioBuffer] = None
 uplink_buffer: Optional[AudioBuffer] = None
 
 # ===================================================================================
+# WHISPER MODEL
+# ===================================================================================
+
+WHISPER_MODEL_NAME = "base"  # Default model, can be changed via config
+
+def set_whisper_model(model_name: str):
+    """Set which Whisper model to use."""
+    global WHISPER_MODEL_NAME, WHISPER_MODEL
+    valid_models = ["tiny", "base", "small", "medium", "large"]
+    if model_name in valid_models:
+        if WHISPER_MODEL is not None and model_name != WHISPER_MODEL_NAME:
+            logger.info("Whisper model changed to '%s' - will load on next use", model_name)
+            WHISPER_MODEL = None  # Force reload
+        WHISPER_MODEL_NAME = model_name
+
+def get_whisper_model():
+    """Lazy load Whisper model."""
+    global WHISPER_MODEL
+    if not WHISPER_AVAILABLE:
+        return None
+    if WHISPER_MODEL is None:
+        model_sizes = {
+            "tiny": "~75MB",
+            "base": "~142MB",
+            "small": "~466MB",
+            "medium": "~1.5GB",
+            "large": "~3GB"
+        }
+        size = model_sizes.get(WHISPER_MODEL_NAME, "")
+        logger.info("Loading Whisper model (%s)... This may take a moment.", WHISPER_MODEL_NAME)
+        logger.info("First run will download the model (%s)", size)
+        WHISPER_MODEL = whisper.load_model(WHISPER_MODEL_NAME)
+        logger.info("Whisper model loaded.")
+    return WHISPER_MODEL
+
+# ===================================================================================
 # VOICE TRIGGER DETECTOR
 # ===================================================================================
 
@@ -158,103 +230,118 @@ class VoiceTriggerDetector:
         self.triggers = [t.lower() for t in triggers]
         self.speaker_name = speaker_name
         self.speaker_role = speaker_role
-        self.recognizer = sr.Recognizer() if SPEECH_RECOGNITION_AVAILABLE else None
         self._buffer = b''
-        self._max_bytes = int(SAMPLE_RATE * 2 * 2 * 2.5)
+        self._max_bytes = int(SAMPLE_RATE * 2 * 2 * 2.5)  # ~2.5 seconds of stereo 16-bit audio
         self._last_check = 0
         self._last_text = ""
-    
+
     def update_speaker(self, name: str, role: str):
         self.speaker_name = name
         self.speaker_role = role
-    
+
     def feed_audio(self, pcm: bytes) -> Optional[str]:
-        if not SPEECH_RECOGNITION_AVAILABLE:
+        if not WHISPER_AVAILABLE:
             return None
-        
+
         self._buffer += pcm
         if len(self._buffer) > self._max_bytes:
             self._buffer = self._buffer[-self._max_bytes:]
-        
+
         import time
         now = time.time()
-        if now - self._last_check < 1.0:
+        if now - self._last_check < 1.5:  # Slightly longer interval for Whisper
             return None
         self._last_check = now
-        
+
         if len(self._buffer) < self._max_bytes // 2:
             return None
-        
+
         try:
-            text = self._recognize(self._buffer)
+            text, process_time = self._recognize(self._buffer)
             if text and text != self._last_text:
                 self._last_text = text
-                log_transcription(self.speaker_name, self.speaker_role, text)
-                
+                log_transcription(self.speaker_name, self.speaker_role, text, process_time)
+
                 text_lower = text.lower()
                 for trigger in self.triggers:
                     if trigger in text_lower:
                         self._buffer = b''
                         return trigger
-        except:
-            pass
+        except Exception as e:
+            print(f"ERROR in feed_audio: {e}", file=sys.stderr)
         return None
-    
+
     def transcribe_only(self, pcm: bytes) -> Optional[str]:
-        if not SPEECH_RECOGNITION_AVAILABLE:
+        if not WHISPER_AVAILABLE:
             return None
-        
+
         self._buffer += pcm
         if len(self._buffer) > self._max_bytes:
             self._buffer = self._buffer[-self._max_bytes:]
-        
+
         import time
         now = time.time()
-        if now - self._last_check < 1.0:
+        if now - self._last_check < 1.5:
             return None
         self._last_check = now
-        
+
         if len(self._buffer) < self._max_bytes // 2:
             return None
-        
+
         try:
-            text = self._recognize(self._buffer)
+            text, process_time = self._recognize(self._buffer)
             if text and text != self._last_text:
                 self._last_text = text
-                log_transcription(self.speaker_name, self.speaker_role, text)
+                log_transcription(self.speaker_name, self.speaker_role, text, process_time)
                 return text
-        except:
-            pass
+        except Exception as e:
+            print(f"ERROR in transcribe_only: {e}", file=sys.stderr)
         return None
-    
-    def _recognize(self, pcm: bytes) -> Optional[str]:
-        if not self.recognizer:
-            return None
+
+    def _recognize(self, pcm: bytes) -> tuple:
+        """Returns (text, processing_time) tuple."""
+        model = get_whisper_model()
+        if model is None:
+            return (None, 0.0)
+
         try:
-            # Stereo to mono
             import struct
+            import time
+
+            start_time = time.time()
+
+            # Stereo 16-bit PCM to mono float32 numpy array
             samples = len(pcm) // 4
             mono = []
             for i in range(samples):
                 left = struct.unpack_from('<h', pcm, i * 4)[0]
                 right = struct.unpack_from('<h', pcm, i * 4 + 2)[0]
-                mono.append(struct.pack('<h', (left + right) // 2))
-            mono_data = b''.join(mono)
-            
-            # Create WAV
-            wav_buf = io.BytesIO()
-            with wave.open(wav_buf, 'wb') as w:
-                w.setnchannels(1)
-                w.setsampwidth(2)
-                w.setframerate(SAMPLE_RATE)
-                w.writeframes(mono_data)
-            wav_buf.seek(0)
-            
-            with sr.AudioFile(wav_buf) as source:
-                audio = self.recognizer.record(source)
-                return self.recognizer.recognize_google(audio)
-        except:
-            return None
+                mono.append((left + right) / 2 / 32768.0)  # Normalize to [-1, 1]
+
+            audio_np = np.array(mono, dtype=np.float32)
+
+            # Resample from 48kHz to 16kHz (Whisper expects 16kHz)
+            # Simple decimation by factor of 3
+            audio_16k = audio_np[::3]
+
+            # Pad or trim to 30 seconds (Whisper expects this)
+            audio_16k = whisper.pad_or_trim(audio_16k)
+
+            # Transcribe
+            result = model.transcribe(
+                audio_16k,
+                language="en",
+                fp16=False,  # Use fp32 for CPU compatibility
+                without_timestamps=True
+            )
+
+            process_time = time.time() - start_time
+            text = result.get("text", "").strip()
+            return (text if text else None, process_time)
+
+        except Exception as e:
+            print(f"ERROR in _recognize: {e}", file=sys.stderr)
+            return (None, 0.0)
     
     def check_silence(self, pcm: bytes) -> bool:
         import struct
@@ -290,12 +377,13 @@ class BufferAudioSource(discord.AudioSource):
 class CommanderVoiceSink(voice_recv.AudioSink):
     """Captures commander's voice. Says BOYS to start, END COMMS to stop.
     Transcribes all commander speech to the log."""
-    
-    def __init__(self, buffer: AudioBuffer, target_id: int, name: str, callback):
+
+    def __init__(self, buffer: AudioBuffer, target_id: int, name: str, callback, loop):
         self.buffer = buffer
         self.target_id = target_id
         self.name = name
         self.callback = callback
+        self.loop = loop
         self._listening = True
         self._broadcasting = False
         self._accumulator = b''
@@ -331,26 +419,26 @@ class CommanderVoiceSink(voice_recv.AudioSink):
             if not self._broadcasting:
                 # Not broadcasting - check for "BOYS" trigger
                 trigger = self.detector.feed_audio(frame)
-                
+
                 if trigger == TRIGGER_START:
                     logger.info("🎙️ BOYS - Broadcast START")
                     self._broadcasting = True
                     self.buffer.activate()
                     self._silence_frames = 0
-                    asyncio.create_task(self.callback("start"))
+                    asyncio.run_coroutine_threadsafe(self.callback("start"), self.loop)
                     self.detector.clear()
             else:
                 # Broadcasting - transcribe speech AND check for "END COMMS"
                 trigger = self.detector.feed_audio(frame)
-                
+
                 if trigger == TRIGGER_STOP:
                     logger.info("🛑 END COMMS - Broadcast STOP")
                     self._broadcasting = False
                     self.buffer.deactivate()
-                    asyncio.create_task(self.callback("stop"))
+                    asyncio.run_coroutine_threadsafe(self.callback("stop"), self.loop)
                     self.detector.clear()
                     continue
-                
+
                 # Check for silence timeout
                 if self.detector.check_silence(frame):
                     self._silence_frames += 1
@@ -358,11 +446,11 @@ class CommanderVoiceSink(voice_recv.AudioSink):
                         logger.info("⏸️ Auto-stop (silence)")
                         self._broadcasting = False
                         self.buffer.deactivate()
-                        asyncio.create_task(self.callback("stop"))
+                        asyncio.run_coroutine_threadsafe(self.callback("stop"), self.loop)
                         continue
                 else:
                     self._silence_frames = 0
-                
+
                 # Push audio to broadcast buffer
                 self.buffer.push(frame)
     
@@ -375,10 +463,11 @@ class CommanderVoiceSink(voice_recv.AudioSink):
 
 
 class SquadVoiceSink(voice_recv.AudioSink):
-    def __init__(self, buffer: AudioBuffer, drone_name: str, callback):
+    def __init__(self, buffer: AudioBuffer, drone_name: str, callback, loop):
         self.buffer = buffer
         self.drone_name = drone_name
         self.callback = callback
+        self.loop = loop
         self._listening = True
         self._uplinking = False
         self._uplink_user_id = None
@@ -415,13 +504,13 @@ class SquadVoiceSink(voice_recv.AudioSink):
                     self._uplink_user_id = user.id
                     self.buffer.activate()
                     self._silence_frames = 0
-                    asyncio.create_task(self.callback("start", user))
+                    asyncio.run_coroutine_threadsafe(self.callback("start", user), self.loop)
                     self.detector.clear()
                 continue
-            
+
             if self._uplinking and user.id == self._uplink_user_id:
                 self.detector.transcribe_only(frame)
-                
+
                 if self.detector.check_silence(frame):
                     self._silence_frames += 1
                     if self._silence_frames > self._silence_max():
@@ -429,7 +518,7 @@ class SquadVoiceSink(voice_recv.AudioSink):
                         self._uplinking = False
                         self._uplink_user_id = None
                         self.buffer.deactivate()
-                        asyncio.create_task(self.callback("stop", user))
+                        asyncio.run_coroutine_threadsafe(self.callback("stop", user), self.loop)
                         self.detector.clear()
                         continue
                 else:
@@ -454,9 +543,9 @@ class MothershipBot(commands.Bot):
         intents.members = True
         
         super().__init__(command_prefix="!", intents=intents)
-        
-        # Commander is set dynamically via !setcommander
-        self.commander_user_id = None
+
+        # Default commander (can be changed via !setcommander)
+        self.commander_user_id = 276201168412082179
         self.commander_name = None
         self.drone_bots: Dict[str, 'DroneBot'] = {}
         self.voice_client = None
@@ -476,17 +565,23 @@ class MothershipBot(commands.Bot):
         logger.info("MOTHERSHIP ONLINE: %s", self.user.name)
         logger.info("Guilds: %s", [g.name for g in self.guilds])
         logger.info("=" * 50)
-        logger.info("⚠️  NO COMMANDER SET")
-        logger.info("Type !list in #relay-chat, then !setcommander [#]")
-        logger.info("=" * 50)
-        
+
+        # Find and set up default commander
         for guild in self.guilds:
             member = guild.get_member(self.commander_user_id)
             if member:
                 self.commander_name = member.display_name
+                logger.info("👑 Default Commander: %s (ID: %d)", member.display_name, self.commander_user_id)
                 if member.voice and member.voice.channel:
+                    logger.info("🎙️ Commander in voice - joining channel...")
                     await self._join_channel(member.voice.channel)
+                else:
+                    logger.info("⏳ Waiting for commander to join voice...")
                 break
+        else:
+            logger.info("⚠️ Default commander (ID: %d) not found in any guild", self.commander_user_id)
+
+        logger.info("=" * 50)
     
     async def on_message(self, message):
         """Handle all messages - commands work in relay-chat."""
@@ -588,8 +683,8 @@ class MothershipBot(commands.Bot):
             try:
                 user_id = int(user_id_str)
                 member = message.guild.get_member(user_id)
-            except:
-                pass
+            except ValueError:
+                pass  # Invalid user ID format
         
         # By name
         else:
@@ -737,9 +832,10 @@ class MothershipBot(commands.Bot):
         try:
             self.voice_client = await channel.connect(cls=voice_recv.VoiceRecvClient)
             logger.info("Mothership joined: %s", channel.name)
-            
+
+            loop = asyncio.get_running_loop()
             self.commander_sink = CommanderVoiceSink(
-                broadcast_buffer, self.commander_user_id, self.commander_name, self._on_trigger
+                broadcast_buffer, self.commander_user_id, self.commander_name, self._on_trigger, loop
             )
             self.voice_client.listen(self.commander_sink)
         except Exception as e:
@@ -789,12 +885,12 @@ class MothershipBot(commands.Bot):
         if self.voice_client:
             try:
                 self.voice_client.stop_listening()
-            except:
-                pass
+            except Exception as e:
+                logger.debug("Cleanup stop_listening: %s", e)
             try:
                 await self.voice_client.disconnect()
-            except:
-                pass
+            except Exception as e:
+                logger.debug("Cleanup disconnect: %s", e)
             self.voice_client = None
 
 # ===================================================================================
@@ -837,9 +933,10 @@ class DroneBot(commands.Bot):
             
             self.voice_client = await channel.connect(cls=voice_recv.VoiceRecvClient)
             logger.info("[%s] Connected to %s", self.drone_name, channel.name)
-            
+
             # Start listening for squad uplinks
-            self.squad_sink = SquadVoiceSink(uplink_buffer, self.drone_name, self._on_squad_trigger)
+            loop = asyncio.get_running_loop()
+            self.squad_sink = SquadVoiceSink(uplink_buffer, self.drone_name, self._on_squad_trigger, loop)
             self.voice_client.listen(self.squad_sink)
             logger.info("[%s] Listening for squad uplinks", self.drone_name)
             
@@ -894,14 +991,14 @@ class DroneBot(commands.Bot):
         if self.voice_client:
             try:
                 self.voice_client.stop_listening()
-            except:
-                pass
+            except Exception as e:
+                logger.debug("[%s] Disconnect stop_listening: %s", self.drone_name, e)
             if self.voice_client.is_playing():
                 self.voice_client.stop()
             try:
                 await self.voice_client.disconnect()
-            except:
-                pass
+            except Exception as e:
+                logger.debug("[%s] Disconnect: %s", self.drone_name, e)
             self.voice_client = None
         logger.info("[%s] Disconnected", self.drone_name)
 
@@ -911,13 +1008,14 @@ class DroneBot(commands.Bot):
 
 async def run_with_config(config: dict, stop_event: threading.Event = None):
     global broadcast_buffer, uplink_buffer, squad_uplink_timeout
-    
+
     setup_logging(config.get("log_level", "DEBUG"))
-    
+
     squad_uplink_timeout = config.get("squad_uplink_timeout", 1.0)
-    
+    set_whisper_model(config.get("whisper_model", "base"))
+
     logger.info("=" * 60)
-    logger.info("MILITARY HIERARCHY VOICE RELAY SYSTEM")
+    logger.info("VOICE RELAY SYSTEM")
     logger.info("=" * 60)
     logger.info("")
     logger.info("All 3 bots connecting simultaneously...")
@@ -962,9 +1060,9 @@ async def run_with_config(config: dict, stop_event: threading.Event = None):
             for bot in [mothership, alpha, bravo]:
                 try:
                     await bot.close()
-                except:
-                    pass
-    
+                except Exception as e:
+                    logger.debug("Stop checker close: %s", e)
+
     try:
         tasks = [
             run_bot(mothership, config["commander_token"], "Mothership"),
@@ -973,20 +1071,20 @@ async def run_with_config(config: dict, stop_event: threading.Event = None):
         ]
         if stop_event:
             tasks.append(stop_checker())
-        
+
         await asyncio.gather(*tasks)
     finally:
         for bot in [alpha, bravo]:
             try:
                 await bot.disconnect()
                 await bot.close()
-            except:
-                pass
+            except Exception as e:
+                logger.debug("Shutdown bot: %s", e)
         try:
             await mothership._cleanup()
             await mothership.close()
-        except:
-            pass
+        except Exception as e:
+            logger.debug("Shutdown mothership: %s", e)
 
 
 def main():

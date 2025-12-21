@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 ===================================================================================
-MILITARY HIERARCHY VOICE RELAY SYSTEM - GUI
+VOICE RELAY SYSTEM - GUI
 ===================================================================================
 Features:
     - Dark theme interface
@@ -36,11 +36,19 @@ DEFAULT_CONFIG = {
     "drone_bravo_token": "",
     "drone_alpha_channel_id": "",
     "drone_bravo_channel_id": "",
-    "relay_chat_channel": "relay-chat",
     "command_prefix": "!",
     "max_buffer_frames": 100,
     "squad_uplink_timeout": 1.0,
+    "whisper_model": "base",
     "log_level": "DEBUG"
+}
+
+WHISPER_MODELS = {
+    "tiny": "Tiny (~75MB) - Fastest, lower accuracy",
+    "base": "Base (~142MB) - Fast, fair accuracy (default)",
+    "small": "Small (~466MB) - Moderate speed, good accuracy",
+    "medium": "Medium (~1.5GB) - Slower, better accuracy",
+    "large": "Large (~3GB) - Slowest, best accuracy"
 }
 
 # ===================================================================================
@@ -77,8 +85,8 @@ def load_config() -> dict:
                     if key not in config:
                         config[key] = value
                 return config
-        except:
-            pass
+        except Exception as e:
+            print(f"ERROR loading config: {e}", file=sys.stderr)
     return DEFAULT_CONFIG.copy()
 
 
@@ -151,9 +159,9 @@ async def test_single_bot(token: str, bot_name: str, channel_id: str = None, log
                             "use_voice_activation": perms.use_voice_activation,
                             "view_channel": perms.view_channel
                         }
-                except:
-                    pass
-        
+                except Exception as e:
+                    print(f"ERROR checking channel: {e}", file=sys.stderr)
+
         ready_event.set()
     
     try:
@@ -170,8 +178,8 @@ async def test_single_bot(token: str, bot_name: str, channel_id: str = None, log
     finally:
         try:
             await client.close()
-        except:
-            pass
+        except Exception as e:
+            print(f"ERROR closing client: {e}", file=sys.stderr)
     
     return result
 
@@ -206,7 +214,7 @@ async def test_all_bots(config: dict, log_func) -> dict:
 class VoiceRelayGUI:
     def __init__(self, root):
         self.root = root
-        self.root.title("Military Voice Relay System")
+        self.root.title("Voice Relay System")
         self.root.geometry("1000x900")
         self.root.minsize(900, 800)
         self.root.configure(bg=COLORS['bg_dark'])
@@ -261,7 +269,7 @@ class VoiceRelayGUI:
         title_frame = tk.Frame(main_frame, bg=COLORS['bg_dark'])
         title_frame.pack(fill=tk.X, pady=(0, 15))
         
-        tk.Label(title_frame, text="⚔ MILITARY VOICE RELAY SYSTEM",
+        tk.Label(title_frame, text="⚔ VOICE RELAY SYSTEM",
                 font=('Segoe UI', 18, 'bold'),
                 bg=COLORS['bg_dark'], fg=COLORS['accent']).pack(side=tk.LEFT)
         
@@ -360,10 +368,165 @@ class VoiceRelayGUI:
                                      font=('Segoe UI', 10, 'bold'),
                                      bg=COLORS['bg_dark'], fg=COLORS['accent'])
         self.timeout_label.pack(side=tk.LEFT, padx=15)
-    
+
+        tk.Frame(parent, height=2, bg=COLORS['border']).pack(fill=tk.X, pady=10)
+
+        # Whisper Model Selection
+        whisper_frame = tk.Frame(parent, bg=COLORS['bg_dark'])
+        whisper_frame.pack(fill=tk.X, pady=5)
+
+        tk.Label(whisper_frame, text="WHISPER MODEL", font=('Segoe UI', 10, 'bold'),
+                bg=COLORS['bg_dark'], fg=COLORS['fg_primary']).pack(anchor=tk.W)
+
+        tk.Label(whisper_frame, text="Speech recognition model (larger = more accurate, slower):",
+                font=('Segoe UI', 9), bg=COLORS['bg_dark'], fg=COLORS['fg_dim']).pack(anchor=tk.W)
+
+        model_select_frame = tk.Frame(whisper_frame, bg=COLORS['bg_dark'])
+        model_select_frame.pack(fill=tk.X, pady=5)
+
+        self.whisper_model_var = tk.StringVar(value=self.config.get("whisper_model", "base"))
+
+        self.whisper_combo = ttk.Combobox(
+            model_select_frame,
+            textvariable=self.whisper_model_var,
+            values=list(WHISPER_MODELS.keys()),
+            state="readonly",
+            width=10,
+            font=('Segoe UI', 10)
+        )
+        self.whisper_combo.pack(side=tk.LEFT)
+
+        self.whisper_download_btn = tk.Button(
+            model_select_frame,
+            text="⬇ Download",
+            font=('Segoe UI', 9),
+            bg=COLORS['bg_light'],
+            fg=COLORS['fg_primary'],
+            relief=tk.FLAT,
+            cursor='hand2',
+            command=self._download_whisper_model
+        )
+        self.whisper_download_btn.pack(side=tk.LEFT, padx=5)
+
+        self.whisper_desc_label = tk.Label(
+            model_select_frame,
+            text=WHISPER_MODELS.get(self.whisper_model_var.get(), ""),
+            font=('Segoe UI', 9),
+            bg=COLORS['bg_dark'],
+            fg=COLORS['fg_secondary']
+        )
+        self.whisper_desc_label.pack(side=tk.LEFT, padx=10)
+
+        # Progress bar for model download
+        self.whisper_progress_frame = tk.Frame(whisper_frame, bg=COLORS['bg_dark'])
+        self.whisper_progress_frame.pack(fill=tk.X, pady=5)
+
+        self.whisper_progress = ttk.Progressbar(
+            self.whisper_progress_frame,
+            mode='determinate',
+            length=400
+        )
+
+        self.whisper_progress_label = tk.Label(
+            self.whisper_progress_frame,
+            text="",
+            font=('Segoe UI', 9),
+            bg=COLORS['bg_dark'],
+            fg=COLORS['accent']
+        )
+
+        self.whisper_combo.bind("<<ComboboxSelected>>", self._on_whisper_model_change)
+
     def _on_timeout_change(self, value):
         self.timeout_label.config(text=f"{float(value):.1f} seconds")
-    
+
+    def _on_whisper_model_change(self, event):
+        model = self.whisper_model_var.get()
+        self.whisper_desc_label.config(text=WHISPER_MODELS.get(model, ""))
+
+    def _download_whisper_model(self):
+        """Download the selected Whisper model with progress."""
+        model = self.whisper_model_var.get()
+        self.whisper_download_btn.config(state=tk.DISABLED, text="Downloading...")
+        self.whisper_progress.pack(side=tk.LEFT)
+        self.whisper_progress_label.pack(side=tk.LEFT, padx=10)
+        self.whisper_progress['value'] = 0
+        self.whisper_progress_label.config(text="Starting download...")
+
+        threading.Thread(target=self._do_download_model, args=(model,), daemon=True).start()
+
+    def _do_download_model(self, model_name):
+        """Background thread to download whisper model."""
+        try:
+            import whisper
+            import urllib.request
+            import os
+
+            # Model URLs from whisper
+            model_urls = {
+                "tiny": "https://openaipublic.azureedge.net/main/whisper/models/65147644a518d12f04e32d6f3b26facc3f8dd46e5390956a9424a650c0ce22b9/tiny.pt",
+                "base": "https://openaipublic.azureedge.net/main/whisper/models/ed3a0b6b1c0edf879ad9b11b1af5a0e6ab5db9205f891f668f8b0e6c6326e34e/base.pt",
+                "small": "https://openaipublic.azureedge.net/main/whisper/models/9ecf779972d90ba49c06d968637d720dd632c55bbf19d441fb42bf17a411e794/small.pt",
+                "medium": "https://openaipublic.azureedge.net/main/whisper/models/345ae4da62f9b3d59415adc60127b97c714f32e89e936602e85993674d08dcb1/medium.pt",
+                "large": "https://openaipublic.azureedge.net/main/whisper/models/e5b1a55b89c1367dacf97e3e19bfd829a01529dbfdeefa8caeb59b3f1b81dadb/large-v3.pt",
+            }
+
+            url = model_urls.get(model_name)
+            if not url:
+                self.root.after(0, lambda: self._download_complete(False, "Unknown model"))
+                return
+
+            # Check if already downloaded
+            cache_dir = os.path.join(os.path.expanduser("~"), ".cache", "whisper")
+            os.makedirs(cache_dir, exist_ok=True)
+            model_file = os.path.join(cache_dir, os.path.basename(url))
+
+            if os.path.exists(model_file):
+                self.root.after(0, lambda: self._update_progress(100, "Model already downloaded!"))
+                self.root.after(1000, lambda: self._download_complete(True, "Already exists"))
+                return
+
+            # Download with progress
+            def progress_hook(block_num, block_size, total_size):
+                if total_size > 0:
+                    percent = min(100, (block_num * block_size * 100) // total_size)
+                    downloaded = block_num * block_size
+                    total_mb = total_size / (1024 * 1024)
+                    downloaded_mb = downloaded / (1024 * 1024)
+                    self.root.after(0, lambda p=percent, d=downloaded_mb, t=total_mb:
+                        self._update_progress(p, f"{d:.1f} / {t:.1f} MB ({p}%)"))
+
+            self.root.after(0, lambda: self._update_progress(0, "Connecting..."))
+            urllib.request.urlretrieve(url, model_file, progress_hook)
+
+            # Verify by loading
+            self.root.after(0, lambda: self._update_progress(100, "Verifying model..."))
+            whisper.load_model(model_name)
+
+            self.root.after(0, lambda: self._download_complete(True, "Download complete!"))
+
+        except Exception as e:
+            self.root.after(0, lambda: self._download_complete(False, str(e)))
+
+    def _update_progress(self, percent, text):
+        self.whisper_progress['value'] = percent
+        self.whisper_progress_label.config(text=text)
+
+    def _download_complete(self, success, message):
+        self.whisper_download_btn.config(state=tk.NORMAL, text="⬇ Download")
+        if success:
+            self.whisper_progress_label.config(text=f"✓ {message}", fg=COLORS['success'])
+            self._log(f"Whisper model '{self.whisper_model_var.get()}' ready", 'SUCCESS')
+        else:
+            self.whisper_progress_label.config(text=f"✗ {message}", fg=COLORS['error'])
+            self._log(f"Download failed: {message}", 'ERROR')
+        # Hide progress bar after 3 seconds
+        self.root.after(3000, self._hide_progress)
+
+    def _hide_progress(self):
+        self.whisper_progress.pack_forget()
+        self.whisper_progress_label.pack_forget()
+
     def _create_token_row(self, parent, label_text, config_key):
         row = tk.Frame(parent, bg=COLORS['bg_dark'])
         row.pack(fill=tk.X, pady=2)
@@ -460,11 +623,12 @@ class VoiceRelayGUI:
         self.log_text.tag_configure('FAIL', foreground='#ff4757')
         
         # Transcription tags
-        self.log_text.tag_configure('TRANSCRIPT_COMMANDER', foreground=COLORS['transcript_commander'], 
+        self.log_text.tag_configure('TRANSCRIPT_COMMANDER', foreground=COLORS['transcript_commander'],
                                    font=('Consolas', 10, 'bold'))
         self.log_text.tag_configure('TRANSCRIPT_SQUAD', foreground=COLORS['transcript_squad'],
                                    font=('Consolas', 10, 'bold'))
         self.log_text.tag_configure('SPEECH', foreground='#ffffff', font=('Consolas', 10, 'italic'))
+        self.log_text.tag_configure('PROCESS_TIME', foreground='#888888', font=('Consolas', 9))
     
     def _toggle_show(self, entry):
         entry.config(show='' if entry.cget('show') == '●' else '●')
@@ -483,11 +647,11 @@ class VoiceRelayGUI:
         self.log_text.see(tk.END)
         self.log_text.config(state=tk.DISABLED)
     
-    def _log_transcription(self, speaker_name: str, speaker_role: str, text: str):
+    def _log_transcription(self, speaker_name: str, speaker_role: str, text: str, process_time: float = 0.0):
         """Display a transcription in the log - commander's orders in gold."""
         self.log_text.config(state=tk.NORMAL)
         timestamp = datetime.now().strftime('%H:%M:%S')
-        
+
         # Determine tag based on role
         if "COMMANDER" in speaker_role.upper():
             role_tag = 'TRANSCRIPT_COMMANDER'
@@ -497,10 +661,13 @@ class VoiceRelayGUI:
             role_tag = 'TRANSCRIPT_SQUAD'
             icon = "📡"
             prefix = "UPLINK"
-        
+
         self.log_text.insert(tk.END, f"[{timestamp}] ", 'TIMESTAMP')
         self.log_text.insert(tk.END, f"{icon} [{prefix}] {speaker_name}: ", role_tag)
-        self.log_text.insert(tk.END, f"\"{text}\"\n", 'SPEECH')
+        self.log_text.insert(tk.END, f"\"{text}\"", 'SPEECH')
+        if process_time > 0:
+            self.log_text.insert(tk.END, f" ({process_time:.2f}s)", 'PROCESS_TIME')
+        self.log_text.insert(tk.END, "\n")
         self.log_text.see(tk.END)
         self.log_text.config(state=tk.DISABLED)
     
@@ -526,7 +693,8 @@ class VoiceRelayGUI:
                         self._log(message, level)
                     elif msg_type == "transcription":
                         speaker_name, speaker_role, text = item[1], item[2], item[3]
-                        self._log_transcription(speaker_name, speaker_role, text)
+                        process_time = item[4] if len(item) > 4 else 0.0
+                        self._log_transcription(speaker_name, speaker_role, text, process_time)
                 else:
                     self._log(str(item), 'INFO')
         except queue.Empty:
@@ -535,7 +703,7 @@ class VoiceRelayGUI:
     
     def _show_startup_info(self):
         self._log_raw("=" * 60, 'HEADER')
-        self._log_raw("   MILITARY HIERARCHY VOICE RELAY SYSTEM", 'HEADER')
+        self._log_raw("   VOICE RELAY SYSTEM", 'HEADER')
         self._log_raw("=" * 60, 'HEADER')
         self._log_raw("", 'INFO')
         self._log_raw("⚡ CONNECTING TO DISCORD...", 'WARNING')
@@ -564,6 +732,7 @@ class VoiceRelayGUI:
             "drone_alpha_channel_id": self.drone_alpha_channel_id_var.get().strip(),
             "drone_bravo_channel_id": self.drone_bravo_channel_id_var.get().strip(),
             "squad_uplink_timeout": self.timeout_var.get(),
+            "whisper_model": self.whisper_model_var.get(),
             "command_prefix": "!",
             "max_buffer_frames": 100,
             "log_level": "DEBUG"
@@ -582,6 +751,8 @@ class VoiceRelayGUI:
         self.drone_alpha_channel_id_var.set(self.config.get("drone_alpha_channel_id", ""))
         self.drone_bravo_channel_id_var.set(self.config.get("drone_bravo_channel_id", ""))
         self.timeout_var.set(self.config.get("squad_uplink_timeout", 1.0))
+        self.whisper_model_var.set(self.config.get("whisper_model", "base"))
+        self._on_whisper_model_change(None)  # Update description label
         self._log("Configuration reloaded", 'INFO')
     
     def _validate_config(self) -> bool:
@@ -688,7 +859,7 @@ class VoiceRelayGUI:
     
     def _run_bot_thread(self):
         try:
-            import military_relay
+            import voice_relay
             
             # Set up log handler
             handler = QueueHandler(self.log_queue)
@@ -699,15 +870,15 @@ class VoiceRelayGUI:
             logging.getLogger().setLevel(logging.DEBUG)
             
             # Set up transcription callback
-            def transcription_cb(speaker, role, text):
-                self.log_queue.put(("transcription", speaker, role, text))
-            
-            military_relay.set_transcription_callback(transcription_cb)
+            def transcription_cb(speaker, role, text, process_time=0.0):
+                self.log_queue.put(("transcription", speaker, role, text, process_time))
+
+            voice_relay.set_transcription_callback(transcription_cb)
             
             self.root.after(0, lambda: self._update_status("ONLINE", COLORS['success']))
             self.bot_running = True
             
-            asyncio.run(military_relay.run_with_config(self._get_config_from_gui(), self.stop_event))
+            asyncio.run(voice_relay.run_with_config(self._get_config_from_gui(), self.stop_event))
         except Exception as e:
             self.log_queue.put(("log", f"ERROR | {e}"))
         finally:
@@ -736,7 +907,7 @@ class VoiceRelayGUI:
     
     def _show_about(self):
         messagebox.showinfo("About",
-            "Military Voice Relay System v4.1\n\n"
+            "Voice Relay System v4.1\n\n"
             "Features:\n"
             "• Auto User ID detection\n"
             "• Commander's orders in log\n"
